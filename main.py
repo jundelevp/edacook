@@ -12,25 +12,24 @@ from aiogram.enums import ParseMode
 from dishes import DISHES
 import os
 import logging
-from dotenv import load_dotenv
 
-load_dotenv()
+# Загружаем токен из переменных окружения (App Platform → Variables)
+bot_token = os.getenv("BOT_TOKEN")
+if not bot_token:
+    raise ValueError("BOT_TOKEN не задан")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === In-memory storage (no DB) ===
 paid_users: set[int] = set()
 free_attempts: dict[int, int] = {}
 last_request_time: dict[int, datetime] = {}
 last_response_cache: dict[int, tuple[str, datetime]] = {}
 
-# === FSM States ===
 class UserPreferences(StatesGroup):
     asking_health = State()
     asking_diet = State()
 
-# === Keyboard builders ===
 def build_health_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -66,7 +65,6 @@ def build_time_suggestion_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🛠 Поддержка", url="https://t.me/Oblastyle")]
     ])
 
-# === Time parsing ===
 def get_time_category(hour: int) -> str:
     if 5 <= hour < 10:
         return "breakfast"
@@ -78,46 +76,30 @@ def get_time_category(hour: int) -> str:
 def parse_hour_from_text(text: str) -> int:
     text = text.lower()
     now = datetime.now().hour
-
-    if any(w in text for w in ["утро", "завтрак", "утром", "с утра", "рано", "8", "9"]):
-        return 8
-    if any(w in text for w in ["обед", "днём", "днем", "10", "11", "12", "13", "14", "15", "16", "17"]):
-        return 13
-    if any(w in text for w in ["ужин", "вечер", "ночь", "сейчас", "поздно", "18", "19", "20", "21", "22", "23", "0", "1", "2", "3", "4", "5", "6", "7"]):
-        return 19
-
+    if any(w in text for w in ["утро", "завтрак", "8", "9"]): return 8
+    if any(w in text for w in ["обед", "10", "11", "12", "13", "14", "15", "16", "17"]): return 13
+    if any(w in text for w in ["ужин", "вечер", "18", "19", "20", "21", "22", "23", "0", "1", "2", "3", "4", "5", "6", "7"]): return 19
     time_match = re.search(r'(\d{1,2})', text)
     if time_match:
         h = int(time_match.group(1))
-        if 0 <= h <= 23:
-            return h
+        if 0 <= h <= 23: return h
     return now
 
 def filter_dishes(hour: int, healthy: bool, diet: str) -> List[Dict[str, Any]]:
     time_cat = get_time_category(hour)
-    filtered = [
-        d for d in DISHES
-        if d["time"] == time_cat
-        and d["healthy"] == healthy
-        and (diet == "any" or d["diet"] == diet)
-    ]
+    filtered = [d for d in DISHES if d["time"] == time_cat and d["healthy"] == healthy and (diet == "any" or d["diet"] == diet)]
     if len(filtered) < 3:
         fallback = [d for d in DISHES if d["time"] == time_cat and d not in filtered]
         filtered += fallback
     return filtered[:3]
 
-# === Router ===
 router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "👨‍🍳 Привет! Я помогу решить, что приготовить — с рецептами и учётом ваших предпочтений.\n\n"
-        "Просто напишите:\n"
-        "• «что приготовить на ужин?»\n"
-        "• «рецепт на завтрак»\n"
-        "• «что сделать в 19:00?»\n\n"
-        "Первый раз — бесплатно. Потом — 299 ₽ навсегда.",
+        "👨‍🍳 Привет! Я — ваш кулинарный помощник. Скажу, что приготовить прямо сейчас — с учётом времени суток, ваших предпочтений и даже покажу простой рецепт.\n\n"
+        "Нажмите любую кнопку ниже, чтобы начать 👇",
         reply_markup=build_time_suggestion_kb()
     )
 
@@ -157,17 +139,6 @@ async def handle_cooking_internal(message: Message, hour: int, user_id: int, sta
         await state.update_data(pending_hour=hour)
         return
 
-    # Кэш для платных пользователей
-    cache_key = f"{hour}_{healthy}_{diet}"
-    now = datetime.now()
-    if user_id in paid_users:
-        if user_id in last_response_cache:
-            cached_resp, cached_time = last_response_cache[user_id]
-            if now - cached_time < timedelta(minutes=5) and cached_resp.startswith(f"КЭШ:{cache_key}"):
-                reply = cached_resp.replace(f"КЭШ:{cache_key}||", "", 1)
-                await message.answer(reply)
-                return
-
     dishes = filter_dishes(hour, healthy, diet)
     if not dishes:
         dishes = filter_dishes(hour, True, "any")[:3]
@@ -178,9 +149,6 @@ async def handle_cooking_internal(message: Message, hour: int, user_id: int, sta
 
     if user_id not in paid_users:
         reply += "✨ Больше рецептов — за 299 ₽ навсегда!"
-    else:
-        last_response_cache[user_id] = (f"КЭШ:{cache_key}||{reply}", now)
-
     await message.answer(reply)
 
 @router.message(F.text)
@@ -189,7 +157,6 @@ async def handle_cooking_query(message: Message, state: FSMContext):
     hour = parse_hour_from_text(message.text)
     await handle_cooking_internal(message, hour, user_id, state)
 
-# === FSM Handlers ===
 @router.callback_query(UserPreferences.asking_health, F.data.startswith("healthy_"))
 async def process_health(callback: CallbackQuery, state: FSMContext):
     healthy = callback.data == "healthy_yes"
@@ -209,18 +176,14 @@ async def process_diet(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# === Payment (mock for production) ===
 @router.callback_query(F.data == "buy_access")
 async def buy_access(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id in paid_users:
         await callback.answer("Уже оплачено!", show_alert=True)
         return
-
     paid_users.add(user_id)
     free_attempts.pop(user_id, None)
-    last_response_cache.pop(user_id, None)
-
     await callback.message.edit_text(
         "✅ Доступ навсегда активирован!\n\n"
         "Теперь вы можете писать мне сколько угодно. Попробуйте:",
@@ -228,24 +191,13 @@ async def buy_access(callback: CallbackQuery):
     )
     await callback.answer("Спасибо за доверие! 🙏", show_alert=True)
 
-# === Main ===
 async def main():
-    bot_token = os.getenv("BOT_TOKEN")
-    if not bot_token:
-        raise ValueError("❌ BOT_TOKEN не найден в .env")
-
     bot = Bot(token=bot_token, parse_mode=ParseMode.HTML)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
-
     logger.info("✅ Бот запущен и готов к работе.")
-    try:
-        await dp.start_polling(bot)
-    except KeyboardInterrupt:
-        logger.info("⏹ Бот остановлен вручную.")
-    finally:
-        await bot.session.close()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
